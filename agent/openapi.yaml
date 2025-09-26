@@ -1,0 +1,118 @@
+# Fragment consumed by Bedrock Agents to pick and invoke actions via Lambda.
+
+paths:
+  /preprocess:
+    post:
+      summary: Preprocess raw images to produce work/<run_id>/processed.npy
+      description: >
+        Applies denoise/normalize/resample to raw .npy/.npz input. Returns a new run_id
+        and S3 key 'work/<run_id>/processed.npy'. Call this FIRST when the user provides
+        raw data or requests denoise/normalize/resample. If run_id is provided, you may
+        also preprocess its digital_twin.npy directly.
+      operationId: preprocess
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                run_id:
+                  type: string
+                  description: Use work/<run_id>/digital_twin.npy as input if source_key is not given.
+                source_key:
+                  type: string
+                  description: Direct S3 key for input (.npz with images/train/val/test_images or .npy).
+                denoise:   { type: boolean, description: Apply mean filter, default: false }
+                normalize: { type: boolean, description: Min–max scale to [0,1], default: false }
+                resample:  { type: boolean, description: Downsample by stride, default: false }
+                export_png:{ type: boolean, description: Export up to 32 preview PNGs, default: false }
+                export_zip:{ type: boolean, description: Zip those PNGs into one file, default: false }
+            examples:
+              from_raw_npz:
+                summary: Preprocess raw chestmnist.npz and export previews
+                value: { "source_key": "raw/chestmnist.npz", "denoise": true, "normalize": true, "export_png": true, "export_zip": true }
+              from_run:
+                summary: Preprocess an existing run’s digital twin
+                value: { "run_id": "run_20250101_120000_ab12cd", "normalize": true }
+      responses:
+        "200":
+          description: Processing completed and outputs persisted to S3.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id: { type: string }
+                  message: { type: string }
+                  output_key: { type: string, description: S3 key of processed.npy }
+                  processed_png_prefix: { type: string, nullable: true }
+                  processed_png_count: { type: integer, nullable: true }
+                  processed_zip_key: { type: string, nullable: true }
+        "400":
+          description: Invalid or missing input (unable to read S3 object or unsupported format).
+        "500":
+          description: Preprocessing failed due to internal error.
+      x-amazon-bedrock-integration:
+        actionType: LAMBDA
+        # Replace with your region/account/function name
+        uri: arn:aws:lambda:${region}:${account-id}:function:ms-latest-outputs
+
+  /synthesis:
+    post:
+      summary: Generate digital twin from processed input (requires processed.npy or run_id)
+      description: >
+        Generates a digital twin using a processed input. Prefer providing run_id (uses
+        work/<run_id>/processed.npy). If only raw data is available, run /preprocess first.
+        If the required processed input is missing, return an error with code MISSING_PREPROCESS.
+      operationId: synthesis
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                run_id:
+                  type: string
+                  description: Use work/<run_id>/processed.npy as input (preferred).
+                source_key:
+                  type: string
+                  description: Direct S3 key to read as input (e.g., work/<run_id>/processed.npy).
+                input_key:
+                  type: string
+                  description: Raw S3 key (.npy/.npz). If provided without a processed input, run /preprocess first.
+                recipe:
+                  type: object
+                  description: Optional metadata for this run.
+                export_png:
+                  type: boolean
+                  description: If true, export preview PNGs of the synthetic images.
+            examples:
+              from_run:
+                summary: Generate from an existing processed run
+                value: { "run_id": "run_20250101_120000_ab12cd", "export_png": true }
+              from_processed_key:
+                summary: Generate from a direct processed.npy key
+                value: { "source_key": "work/run_.../processed.npy" }
+      responses:
+        "200":
+          description: Digital twin generated and written to S3.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run_id: { type: string }
+                  message: { type: string }
+                  digital_twin_key: { type: string }
+                  status_key: { type: string }
+                  digital_twin_png_prefix: { type: string, nullable: true }
+        "422":
+          description: Missing processed input; needs preprocessing first (error code MISSING_PREPROCESS).
+        "500":
+          description: Synthesis failed due to internal error.
+      x-amazon-bedrock-integration:
+        actionType: LAMBDA
+        # Replace with your region/account/function name
+        uri: arn:aws:lambda:${region}:${account-id}:function:ms-start-generation
